@@ -11,5 +11,8 @@
   "description": "",
   "devDependencies": {
     "wrangler": "^4.79.0"
+  },
+  "dependencies": {
+    "ws": "^8.20.0"
   }
 }

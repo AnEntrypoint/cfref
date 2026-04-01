@@ -1,221 +1,178 @@
-/**
- * TunnelSession - Durable Object for TCP tunnel session
- * 
- * Manages a single TCP connection to a target server.
- * Data flows bidirectionally between:
- * - Client WebSocket <-> This DO <-> Target TCP Server
- */
-
 import { connect, Socket } from "cloudflare:sockets";
 
-export interface TunnelConfig {
-  targetHost: string;
-  targetPort: number;
-  clientToken?: string;
-}
-
 export class TunnelSession {
-  private socket: Socket | null = null;
-  private config: TunnelConfig | null = null;
-  private clientSocket: WebSocket | null = null;
+  private localClient: WebSocket | null = null;
+  private peers: Map<string, WebSocket> = new Map();
+  private localSockets: Map<string, Socket> = new Map();
 
-  constructor(private state: DurableObjectState) {
-    // Set up alarm for connection health checks
-    this.state.storage.put("lastActivity", Date.now());
-  }
+  constructor(private state: DurableObjectState) {}
 
   async fetch(request: Request): Promise<Response> {
-    // Handle session initialization
-    if (request.method === "POST" && request.url === "http://internal/init") {
-      return this.initializeSession(request);
+    const url = new URL(request.url);
+
+    if (url.pathname.endsWith("/register")) {
+      return this.handleRegister(request);
     }
 
-    // WebSocket upgrade for client connection
-    const upgradeHeader = request.headers.get("Upgrade");
-    if (upgradeHeader === "websocket") {
-      return this.handleWebSocket(request);
+    if (url.pathname.endsWith("/connect")) {
+      return this.handlePeerConnect(request);
     }
 
-    // Regular HTTP - return session status
     return new Response(JSON.stringify({
-      status: this.socket ? "connected" : "disconnected",
-      config: this.config
+      hasLocalClient: this.localClient !== null,
+      peerCount: this.peers.size
     }), {
       headers: { "Content-Type": "application/json" }
     });
   }
 
-  private async initializeSession(request: Request): Promise<Response> {
-    try {
-      const body = await request.json() as TunnelConfig;
-      this.config = body;
-      
-      await this.state.storage.put("config", body);
-      await this.state.storage.put("lastActivity", Date.now());
-
-      return new Response(JSON.stringify({ success: true }), {
-        headers: { "Content-Type": "application/json" }
-      });
-    } catch (e) {
-      return new Response(JSON.stringify({ error: "Invalid config" }), {
-        status: 400,
-        headers: { "Content-Type": "application/json" }
-      });
-    }
-  }
-
-  private async handleWebSocket(request: Request): Promise<Response> {
-    if (!this.config) {
-      return new Response("Session not initialized", { status: 400 });
+  private async handleRegister(request: Request): Promise<Response> {
+    const upgradeHeader = request.headers.get("Upgrade");
+    if (upgradeHeader !== "websocket") {
+      return new Response("Expected WebSocket", { status: 400 });
     }
 
-    // Create WebSocket pair
+    if (this.localClient) {
+      return new Response("Session already has a local client", { status: 409 });
+    }
+
     const pair = new WebSocketPair();
-    const clientSocket = pair[1];
-    const serverSocket = pair[0];
+    const client = pair[1];
+    const server = pair[0];
 
-    // @ts-expect-error - ServerWebSocket is not in the types
-    this.clientSocket = serverSocket as unknown as WebSocket;
+    this.localClient = server;
+    server.accept();
 
-    // @ts-expect-error - ServerWebSocket methods
-    serverSocket.accept();
-    
-    // @ts-expect-error - ServerWebSocket event handlers
-    serverSocket.addEventListener("message", async (event) => {
-      await this.handleClientData(event);
-    });
-    
-    // @ts-expect-error - ServerWebSocket event handlers
-    serverSocket.addEventListener("close", async () => {
-      await this.handleClientClose();
+    server.addEventListener("message", (event) => {
+      this.handleLocalMessage(event);
     });
 
-    // @ts-expect-error - ServerWebSocket event handlers
-    serverSocket.addEventListener("error", async (event) => {
-      console.error("WebSocket error:", event);
-      await this.cleanup();
+    server.addEventListener("close", () => {
+      this.handleLocalDisconnect();
     });
 
-    try {
-      // Connect to target TCP server
-      await this.connectToTarget();
-    } catch (e) {
-      console.error("Failed to connect to target:", e);
-      // @ts-expect-error - ServerWebSocket close
-      serverSocket.close(1011, "Failed to connect to target");
-      return new Response(null, { status: 101, webSocket: clientSocket });
-    }
+    server.addEventListener("error", () => {
+      this.handleLocalDisconnect();
+    });
 
-    return new Response(null, { status: 101, webSocket: clientSocket });
+    return new Response(null, { status: 101, webSocket: client });
   }
 
-  private async connectToTarget(): Promise<void> {
-    if (!this.config) {
-      throw new Error("No config");
+  private async handlePeerConnect(request: Request): Promise<Response> {
+    const upgradeHeader = request.headers.get("Upgrade");
+    if (upgradeHeader !== "websocket") {
+      return new Response("Expected WebSocket", { status: 400 });
     }
 
-    const { targetHost, targetPort } = this.config;
+    if (!this.localClient) {
+      return new Response("No local client connected", { status: 503 });
+    }
 
-    // Use Cloudflare's connect() API to create TCP socket
-    this.socket = await connect({
-      hostname: targetHost,
-      port: targetPort
+    const peerId = crypto.randomUUID();
+    const pair = new WebSocketPair();
+    const client = pair[1];
+    const server = pair[0];
+
+    this.peers.set(peerId, server);
+    server.accept();
+
+    server.addEventListener("message", (event) => {
+      this.handlePeerMessage(peerId, event);
     });
 
-    // @ts-expect-error - Socket data event
-    this.socket.addEventListener("data", async (event) => {
-      await this.handleTargetData(event);
+    server.addEventListener("close", () => {
+      this.handlePeerDisconnect(peerId);
     });
 
-    // @ts-expect-error - Socket close event
-    this.socket.addEventListener("close", async () => {
-      await this.handleTargetClose();
+    server.addEventListener("error", () => {
+      this.handlePeerDisconnect(peerId);
     });
 
-    // @ts-expect-error - Socket error event
-    this.socket.addEventListener("error", async (event) => {
-      console.error("Target socket error:", event);
-      await this.cleanup();
-    });
+    this.localClient.send(JSON.stringify({
+      type: "peer_connected",
+      peerId
+    }));
 
-    console.log(`Connected to ${targetHost}:${targetPort}`);
+    return new Response(null, { status: 101, webSocket: client });
   }
 
-  private async handleClientData(event: MessageEvent): Promise<void> {
-    if (!this.socket) {
-      console.error("No target socket");
-      return;
-    }
-
-    try {
-      // Write data to target server
-      const encoder = new TextEncoder();
-      const data = typeof event.data === "string" 
-        ? encoder.encode(event.data) 
-        : event.data;
-      
-      this.socket.write(data);
-      await this.state.storage.put("lastActivity", Date.now());
-    } catch (e) {
-      console.error("Error writing to target:", e);
-      await this.cleanup();
-    }
-  }
-
-  private async handleTargetData(event: MessageEvent): Promise<void> {
-    if (!this.clientSocket) {
-      return;
-    }
-
-    try {
-      // Forward data to client via WebSocket
-      // @ts-expect-error - ServerWebSocket send
-      this.clientSocket.send(event.data);
-      await this.state.storage.put("lastActivity", Date.now());
-    } catch (e) {
-      console.error("Error sending to client:", e);
-    }
-  }
-
-  private async handleClientClose(): Promise<void> {
-    console.log("Client disconnected");
-    await this.cleanup();
-  }
-
-  private async handleTargetClose(): Promise<void> {
-    console.log("Target disconnected");
-    
-    // Notify client that target closed
-    if (this.clientSocket) {
+  private async handleLocalMessage(event: MessageEvent) {
+    if (typeof event.data === "string") {
       try {
-        // @ts-expect-error - ServerWebSocket close
-        this.clientSocket.close(1000, "Target closed connection");
-      } catch (e) {
-        // Ignore
-      }
+        const msg = JSON.parse(event.data);
+        if (msg.type === "peer_data" && msg.peerId) {
+          const peer = this.peers.get(msg.peerId);
+          if (peer) {
+            try {
+              const binary = atob(msg.data);
+              const bytes = new Uint8Array(binary.length);
+              for (let i = 0; i < binary.length; i++) {
+                bytes[i] = binary.charCodeAt(i);
+              }
+              peer.send(bytes);
+            } catch {
+              this.handlePeerDisconnect(msg.peerId);
+            }
+          }
+        }
+        if (msg.type === "peer_closed" && msg.peerId) {
+          const peer = this.peers.get(msg.peerId);
+          if (peer) {
+            try { peer.close(1000); } catch {}
+            this.peers.delete(msg.peerId);
+          }
+        }
+      } catch {}
     }
-    
-    await this.cleanup();
   }
 
-  private async cleanup(): Promise<void> {
-    try {
-      if (this.socket) {
-        this.socket.close();
-        this.socket = null;
-      }
-    } catch (e) {
-      // Ignore cleanup errors
-    }
+  private async handlePeerMessage(peerId: string, event: MessageEvent) {
+    if (!this.localClient) return;
 
     try {
-      if (this.clientSocket) {
-        // @ts-expect-error - ServerWebSocket close
-        this.clientSocket.close();
-        this.clientSocket = null;
+      let data: string;
+      if (typeof event.data === "string") {
+        data = btoa(event.data);
+      } else {
+        const bytes = new Uint8Array(event.data as ArrayBuffer);
+        let binary = "";
+        for (let i = 0; i < bytes.length; i++) {
+          binary += String.fromCharCode(bytes[i]);
+        }
+        data = btoa(binary);
       }
-    } catch (e) {
-      // Ignore cleanup errors
+
+      this.localClient.send(JSON.stringify({
+        type: "peer_data",
+        peerId,
+        data
+      }));
+    } catch {
+      this.handlePeerDisconnect(peerId);
     }
+  }
+
+  private handlePeerDisconnect(peerId: string) {
+    this.peers.delete(peerId);
+    if (this.localClient) {
+      try {
+        this.localClient.send(JSON.stringify({
+          type: "peer_disconnected",
+          peerId
+        }));
+      } catch {}
+    }
+  }
+
+  private handleLocalDisconnect() {
+    this.localClient = null;
+    for (const [peerId, peer] of this.peers) {
+      try { peer.close(1011, "Local client disconnected"); } catch {}
+    }
+    this.peers.clear();
+    for (const [, socket] of this.localSockets) {
+      try { socket.close(); } catch {}
+    }
+    this.localSockets.clear();
   }
 }
