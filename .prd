@@ -1,0 +1,78 @@
+[
+  {
+    "id": "worker-server-durable-object",
+    "subject": "Create Cloudflare Worker server with Durable Objects for TCP relay",
+    "status": "pending",
+    "description": "Worker handles client connections, manages TCP socket connections to target servers, routes traffic via Durable Objects",
+    "effort": "large",
+    "category": "feature",
+    "blocking": [],
+    "blockedBy": [],
+    "acceptance": [
+      "Worker deploys with wrangler",
+      "Accepts TCP connections from clients",
+      "Proxies to remote TCP servers via connect() API",
+      "Uses Durable Objects for connection state management"
+    ],
+    "edge_cases": [
+      "Connection drops - reconnection logic needed",
+      "Multiple simultaneous connections",
+      "Large data transfer buffering"
+    ]
+  },
+  {
+    "id": "node-client-cli",
+    "subject": "Build Node.js client CLI for local port forwarding",
+    "status": "pending",
+    "description": "CLI tool that connects to worker, accepts local TCP connections, forwards through tunnel",
+    "effort": "large",
+    "category": "feature",
+    "blocking": [],
+    "blockedBy": ["worker-server-durable-object"],
+    "acceptance": [
+      "CLI authenticates with worker",
+      "Listens on specified local port",
+      "Forwards traffic through worker to target server",
+      "Handles reconnection on disconnect"
+    ],
+    "edge_cases": [
+      "Auth failure handling",
+      "Worker unavailable at startup",
+      "Multiple port forwarding support"
+    ]
+  },
+  {
+    "id": "wrangler-login-browser",
+    "subject": "Log into Cloudflare via wrangler using browser",
+    "status": "completed",
+    "description": "Use browser automation to authenticate with Cloudflare for wrangler deployment",
+    "effort": "medium",
+    "category": "infra",
+    "blocking": [],
+    "blockedBy": [],
+    "acceptance": [
+      "Browser login completes successfully",
+      "Wrangler auth tokens stored",
+      "Can deploy worker without re-login"
+    ],
+    "edge_cases": [
+      "MFA required",
+      "Session expiry"
+    ]
+  },
+  {
+    "id": "udp-proxy-limitation",
+    "subject": "Document UDP proxy limitation or find workaround",
+    "status": "completed",
+    "description": "Cloudflare Workers TCP Socket API doesn't support UDP - need to document this or explore alternatives",
+    "effort": "small",
+    "category": "feature",
+    "blocking": [],
+    "blockedBy": [],
+    "acceptance": [
+      "Document that UDP is not supported with Workers TCP Socket API",
+      "Or find/workaround for UDP use case"
+    ],
+    "edge_cases": []
+  }
+]
