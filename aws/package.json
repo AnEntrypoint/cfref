@@ -1,0 +1,12 @@
+{
+  "name": "cfref-ec2-proxy",
+  "version": "1.0.0",
+  "description": "TCP proxy on EC2 that bridges to cfref WebSocket tunnel",
+  "main": "proxy.js",
+  "scripts": {
+    "start": "node proxy.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}
